@@ -6,12 +6,16 @@ import (
 	"crypto/md5"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"sort"
 	"strings"
+
+	"github.com/thinkoner/openssl"
 )
 
 const bodyType = "application/xml; charset=utf-8"
@@ -385,4 +389,71 @@ func (c *Client) AuthCodeToOpenid(params Params) (Params, error) {
 		return nil, err
 	}
 	return c.processResponseXml(xmlStr)
+}
+
+// notify接口
+func (c *Client) NotifyUrl(req *http.Request) (p Params, err error) {
+	var body []byte
+	if body, err = ioutil.ReadAll(req.Body); err != nil {
+		return
+	}
+	xmlStr := string(body)
+	return c.processResponseXml(xmlStr)
+}
+
+// refund notify接口
+func (c *Client) RefundNotifyUrl(req *http.Request) (p Params, err error) {
+	var body []byte
+	if body, err = ioutil.ReadAll(req.Body); err != nil {
+		return
+	}
+	xmlStr := string(body)
+	p, err = c.processResponseXml(xmlStr)
+	if err != nil {
+		return
+	}
+
+	// 对 req_info进行解密操作
+	/***
+	解密步骤如下：
+	（1）对加密串A做base64解码，得到加密串B
+	（2）对商户key做md5，得到32位小写key* ( key设置路径：微信商户平台(pay.weixin.qq.com)-->账户设置-->API安全-->密钥设置 )
+	（3）用key*对加密串B做AES-256-ECB解密（PKCS7Padding）
+	***/
+	info := p.GetString("req_info")
+	var dec []byte
+	if dec, err = base64.StdEncoding.DecodeString(info); err != nil {
+		return
+	}
+	md5str := fmt.Sprintf("%x", md5.Sum([]byte(c.account.apiKey)))
+	var dec2 []byte
+	dec2, err = openssl.AesECBDecrypt(dec, []byte(md5str), openssl.PKCS7_PADDING)
+	if err != nil {
+		return
+	}
+	destr := string(dec2)
+	var ext Params
+	if ext, err = c.processResponseXml(destr); err != nil {
+		return
+	}
+	// 将结果复制到p中
+	for k, v := range ext {
+		p.SetString(k, v)
+	}
+	return
+}
+
+// 获取sandboxkey
+func (c *Client) GetSandboxKey() (p Params, err error) {
+	var url string
+	if c.account.isSandbox {
+		url = SandboxGetKeyUrl
+		params := make(Params)
+		xmlStr, err := c.postWithoutCert(url, params)
+		if err != nil {
+			return nil, err
+		}
+		return c.processResponseXml(xmlStr)
+	}
+	return nil, nil
 }
